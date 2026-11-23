@@ -142,10 +142,11 @@ jobs:
       - name: Send notification to Google Chat
         shell: bash
         run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           curl -sS -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK }}" \
             -H "Content-Type: application/json" \
             -d @- <<EOF
           {
-            "text": "*Pipeline CI/CD - SafeBase*\n*Statut* : ${{ steps.status.outputs.state }}\n*Branche/Tag* : ${{ github.ref_name }}\n*Commit* : ${{ github.sha }} par ${{ github.actor }}\n*Message* : ${{ github.event.head_commit.message }}\n*Détails* : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            "text": "*Pipeline CI/CD - SafeBase*\n*Statut* : ${{ steps.status.outputs.state }}\n*Branche/Tag* : ${{ github.ref_name }}\n*Commit* : ${SHORT_SHA} par ${{ github.actor }}\n*Message* : ${{ github.event.head_commit.message }}\n*Détails* : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           }
           EOF
