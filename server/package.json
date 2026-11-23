@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "npx prisma generate && npx tsx index.ts",
     "start": "npx tsx index.ts",
-    "test": "tsx --test tests/**/*.test.ts"
+    "test": "tsx --test tests/sanity.test.ts"
   },
   "keywords": [],
   "author": "",

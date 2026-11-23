@@ -1,0 +1,151 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: ${{ github.repository_owner }}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Tests : la pipeline s'arrête immédiatement si l'un des jobs échoue,
+  # car build-and-push dépend (needs) de ce job.
+  # ---------------------------------------------------------------------
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm install
+
+      - name: Generate Prisma client
+        working-directory: server
+        run: npx prisma generate
+
+      - name: Run server tests
+        working-directory: server
+        run: npm test
+
+      - name: Install client dependencies
+        working-directory: client
+        run: npm install
+
+      - name: Build client
+        working-directory: client
+        run: npm run build
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Run worker-go tests
+        working-directory: worker-go
+        run: go test ./...
+
+  # ---------------------------------------------------------------------
+  # Build & push des images Docker vers GitHub Container Registry (GHCR).
+  # Tag "dev-<sha>" + "dev" pour les push sur main, tag git (ex: v1.0.0)
+  # + "latest" pour les tags Git (= release de production).
+  # ---------------------------------------------------------------------
+  build-and-push:
+    name: Build & push Docker images
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [server, client, worker-go]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine image tags
+        id: vars
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+            echo "tags=${TAG_NAME},latest" >> "$GITHUB_OUTPUT"
+            echo "environment=production" >> "$GITHUB_OUTPUT"
+          else
+            SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+            echo "tags=dev-${SHORT_SHA},dev" >> "$GITHUB_OUTPUT"
+            echo "environment=development" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build metadata (tags)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/safebase-${{ matrix.service }}
+          tags: |
+            ${{ steps.vars.outputs.tags }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push ${{ matrix.service }} image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.service }}
+          push: true
+          build-args: |
+            APP_ENV=${{ steps.vars.outputs.environment }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------
+  # Notification Google Chat : exécutée à chaque fin de pipeline
+  # (succès ou échec), avec commit, statut et éventuelles erreurs.
+  # ---------------------------------------------------------------------
+  notify:
+    name: Notify Google Chat
+    needs: [test, build-and-push]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute pipeline status
+        id: status
+        shell: bash
+        run: |
+          if [[ "${{ needs.test.result }}" == "success" && "${{ needs.build-and-push.result }}" == "success" ]]; then
+            echo "state=✅ Succès" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=❌ Échec" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send notification to Google Chat
+        shell: bash
+        run: |
+          curl -sS -X POST "${{ secrets.GOOGLE_CHAT_WEBHOOK }}" \
+            -H "Content-Type: application/json" \
+            -d @- <<EOF
+          {
+            "text": "*Pipeline CI/CD - SafeBase*\n*Statut* : ${{ steps.status.outputs.state }}\n*Branche/Tag* : ${{ github.ref_name }}\n*Commit* : ${{ github.sha }} par ${{ github.actor }}\n*Message* : ${{ github.event.head_commit.message }}\n*Détails* : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
